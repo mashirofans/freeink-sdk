@@ -84,7 +84,7 @@ class ScopedI2CLock {
 // app_ioe.c freezes CFG/INV as read-only (changing a direction can drive a sense
 // pin — PGOOD, card detect).
 // ---------------------------------------------------------------------------
-uint8_t g_ioeOutput = READPICO_IOE_OUT0_INIT;
+std::atomic<uint8_t> g_ioeOutput{READPICO_IOE_OUT0_INIT};
 bool g_ioeReady = false;
 
 // ---------------------------------------------------------------------------
@@ -501,18 +501,33 @@ bool i2cRead(uint8_t addr, uint8_t reg, uint8_t* data, size_t len) {
   return true;
 }
 
-uint8_t ioeOutput() { return g_ioeOutput; }
+uint8_t ioeOutput() { return g_ioeOutput.load(std::memory_order_relaxed); }
 
 bool ioeSetOutput(uint8_t value) {
+  ScopedI2CLock lock;
   if (!detail::i2cWrite(READPICO_IOE_ADDR, READPICO_IOE_REG_OUT0, &value, 1)) return false;
-  g_ioeOutput = value;
+  g_ioeOutput.store(value, std::memory_order_relaxed);
   return true;
 }
 
 bool ioeSetBit(uint8_t bit, bool high) {
+  if (bit >= 8) return false;
+  ScopedI2CLock lock;
   const uint8_t mask = static_cast<uint8_t>(1U << bit);
-  const uint8_t next = high ? static_cast<uint8_t>(g_ioeOutput | mask) : static_cast<uint8_t>(g_ioeOutput & ~mask);
-  return ioeSetOutput(next);
+  const uint8_t current = g_ioeOutput.load(std::memory_order_relaxed);
+  const uint8_t next = high ? static_cast<uint8_t>(current | mask) : static_cast<uint8_t>(current & ~mask);
+  if (!detail::i2cWrite(READPICO_IOE_ADDR, READPICO_IOE_REG_OUT0, &next, 1)) return false;
+  g_ioeOutput.store(next, std::memory_order_relaxed);
+  return true;
+}
+
+bool ioeUpdateBits(uint8_t setMask, uint8_t clearMask) {
+  ScopedI2CLock lock;
+  const uint8_t current = g_ioeOutput.load(std::memory_order_relaxed);
+  const uint8_t next = static_cast<uint8_t>((current | setMask) & static_cast<uint8_t>(~clearMask));
+  if (!detail::i2cWrite(READPICO_IOE_ADDR, READPICO_IOE_REG_OUT0, &next, 1)) return false;
+  g_ioeOutput.store(next, std::memory_order_relaxed);
+  return true;
 }
 
 // Port-0 self-test, mirroring read_pico_board.c `fca9555_selftest` minus the
@@ -536,8 +551,8 @@ bool ioeConfigure() {
   }
   const uint8_t cfg1 = READPICO_IOE_CFG1_UNUSED;
   if (!i2cWrite(READPICO_IOE_ADDR, READPICO_IOE_REG_CFG1, &cfg1, 1)) return false;
-  g_ioeOutput = READPICO_IOE_OUT0_INIT;
-  return ioeSetOutput(g_ioeOutput);
+  g_ioeOutput.store(READPICO_IOE_OUT0_INIT, std::memory_order_relaxed);
+  return ioeSetOutput(READPICO_IOE_OUT0_INIT);
 }
 
 bool ioeReadPort0(uint8_t& in0) { return i2cRead(READPICO_IOE_ADDR, READPICO_IOE_REG_IN0, &in0, 1); }
@@ -706,6 +721,23 @@ bool touchReset() {
   if (!detail::ioeSetBit(READPICO_IOE_TP_RST, false)) return false;
   delay(10);
   return detail::ioeSetBit(READPICO_IOE_TP_RST, true);
+}
+
+bool touchReadReg(const uint8_t reg, uint8_t* out, const uint8_t len) {
+  if (out == nullptr || len == 0) return false;
+  // CST836U requires a STOP between the register write and the read. Keep the
+  // complete transaction under the same recursive bus lock used by PMU/FCA/RTC.
+  ScopedI2CLock lock;
+  Wire.beginTransmission(READPICO_TP_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return false;
+  delayMicroseconds(5);
+  if (Wire.requestFrom(READPICO_TP_ADDR, len, static_cast<uint8_t>(true)) != len) {
+    while (Wire.available()) Wire.read();
+    return false;
+  }
+  for (uint8_t i = 0; i < len; ++i) out[i] = static_cast<uint8_t>(Wire.read());
+  return true;
 }
 
 bool touchSleep() {

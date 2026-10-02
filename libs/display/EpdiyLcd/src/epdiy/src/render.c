@@ -316,14 +316,14 @@ void epd_clear_area_cycles(EpdRect area, int cycles, int cycle_time) {
 
     for (int c = 0; c < cycles; c++) {
         for (int i = 0; i < 10; i++) {                       //  10 --->   3  20251124 test
-            epd_push_pixels(area, dark_time, 0);                  
+            epd_push_pixels(area, dark_time, 0);
         }
         // 此面板擦白需要比压黑更多相位，否则容易停在浅灰。
         for (int i = 0; i < 13; i++) {
             epd_push_pixels(area, white_time, 1);
         }
         for (int i = 0; i < 3; i++) {                       //  3 --->   1  20251124 test
-            epd_push_pixels(area, white_time, 2);            
+            epd_push_pixels(area, white_time, 2);
         }
     }
 }
@@ -550,7 +550,7 @@ EpdRect epd_difference_image_base(
             break;
     }
     for (max_x = x_end - 1; max_x >= crop_to.x; max_x--) {
-        uint8_t mask = min_x % 2 ? 0xF0 : 0x0F;
+        uint8_t mask = max_x % 2 ? 0xF0 : 0x0F;
         if ((col_dirtyness[max_x / 2] & mask) != 0)
             break;
     }

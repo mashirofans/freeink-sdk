@@ -1794,6 +1794,12 @@ void InputManager::beginCst836u() {
 }
 
 bool InputManager::cst836uReadReg(const uint8_t reg, uint8_t* out, const uint8_t len) {
+#if FREEINK_DEVICE_READPICO
+  // Read Pico shares this bus with the PMU, FCA9555 and RTC. BoardReadPico owns
+  // the recursive bus lock; bypassing it here lets a 125 Hz touch poll tear a
+  // PMU frame in another task.
+  return BoardReadPico::touchReadReg(reg, out, len);
+#else
   // cst836u.c read_regs(): transmit the register byte, a ~5 µs gap, then receive.
   // That is a STOP followed by a fresh START, not the repeated START the other
   // backends use here — it is the only transaction shape verified for this part.
@@ -1808,6 +1814,7 @@ bool InputManager::cst836uReadReg(const uint8_t reg, uint8_t* out, const uint8_t
   }
   for (uint8_t i = 0; i < len; ++i) out[i] = static_cast<uint8_t>(Wire.read());
   return true;
+#endif
 }
 
 uint8_t InputManager::cst836uReadFrame(uint8_t* out) {

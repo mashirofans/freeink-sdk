@@ -464,7 +464,10 @@ bool epdiyLcdDrawGray(const uint8_t* lsb, const uint8_t* msb, EpdiyLcdRefresh mo
 
 void epdiyLcdDeepSleep() {
   if (!g_started) return;
-  (void)epd_poweroff();
+  // epd_renderer_deinit(), reached through epdiyLcdEnd(), owns the board
+  // power-off callback. Calling epd_poweroff() here as well repeats the
+  // Read Pico PMIC shutdown sequence (including its 500 ms hold delay) and
+  // can issue a second transaction after SY7636A has already been disabled.
   epdiyLcdEnd();
 }
 

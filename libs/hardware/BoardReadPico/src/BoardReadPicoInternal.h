@@ -35,6 +35,10 @@ bool i2cRead(uint8_t addr, uint8_t reg, uint8_t* data, size_t len);
 uint8_t ioeOutput();
 bool ioeSetOutput(uint8_t value);
 bool ioeSetBit(uint8_t bit, bool high);
+// Atomically update a set/clear mask against the FCA9555 output shadow and
+// commit one Port-0 write. Callers use this for multi-bit rail sequencing so a
+// concurrent touch-reset/key path cannot lose unrelated output bits.
+bool ioeUpdateBits(uint8_t setMask, uint8_t clearMask);
 // Write CFG0, then read it back and compare — the reference's
 // `fca9555_selftest` step for the direction register.
 bool ioeConfigure();

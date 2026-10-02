@@ -49,6 +49,11 @@ bool sdCardPresent();
 // (read_pico_board.c `read_pico_touch_reset`, cst836u.h RST_HOLD_MS/RST_BOOT_MS).
 bool touchReset();
 
+// Read a CST836U register under the board's shared-I2C lock. InputManager uses
+// this seam on Read Pico so touch polling cannot interleave with PMU/FCA/RTC
+// transactions from another task.
+bool touchReadReg(uint8_t reg, uint8_t* out, uint8_t len);
+
 // Put the CST836U into deep sleep (command 0xA503, MSB first —
 // cst836u.c `write_cmd` + CST836U_CMD_DEEPSLEEP). It ignores I2C afterwards
 // until touchReset() pulses RST. Returns false if the write did not complete.

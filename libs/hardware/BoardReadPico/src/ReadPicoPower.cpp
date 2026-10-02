@@ -93,6 +93,10 @@ bool syI2cBegin() {
 void syI2cEndIfWoke(bool woke) {
   if (!woke || g_railsOn) return;
   (void)syEn(false);
+  // If the expander write failed, syEn() cannot update its shadow. Treat the
+  // PMIC as disabled anyway so the next power-on retries the enable sequence
+  // instead of believing the digital core is still alive.
+  g_syEnOn = false;
 }
 
 }  // namespace
@@ -168,9 +172,9 @@ bool epdPowerOn() {
 
   // 1. MODE = 1, XOE = 0 in one expander commit (read_pico_board.c sets both
   //    state fields and calls board_set_ctrl once).
-  uint8_t out0 = static_cast<uint8_t>(detail::ioeOutput() | (1U << READPICO_IOE_MODE));
-  out0 = static_cast<uint8_t>(out0 & ~(1U << READPICO_IOE_XOE));
-  if (!detail::ioeSetOutput(out0)) return false;
+  if (!detail::ioeUpdateBits(static_cast<uint8_t>(1U << READPICO_IOE_MODE),
+                             static_cast<uint8_t>(1U << READPICO_IOE_XOE)))
+    return false;
 
   // 2. SY_EN = 1 and wait for the PMIC digital core (en_settle_ms = 20 ms).
   const bool woke = !g_syEnOn;
@@ -227,8 +231,7 @@ bool epdPowerOn() {
   g_railsOn = true;
 
   // 4. XOE = 1, rails on.
-  out0 = static_cast<uint8_t>(detail::ioeOutput() | (1U << READPICO_IOE_XOE));
-  if (!detail::ioeSetOutput(out0)) {
+  if (!detail::ioeUpdateBits(static_cast<uint8_t>(1U << READPICO_IOE_XOE), 0)) {
     epdPowerOff();
     return false;
   }
@@ -241,15 +244,17 @@ void epdPowerOff() {
   // sy7636a_power_off() -> VCOM_EN low, OPERATION = 0x00, poweroff_hold_ms
   // (500 ms) hold, then SY_EN = 0. §3.4 lists the first three and "PMIC off";
   // the 500 ms hold IS part of the PMIC's own off sequence, so it is kept here.
-  uint8_t out0 = static_cast<uint8_t>(detail::ioeOutput() & ~(1U << READPICO_IOE_XOE));
-  out0 = static_cast<uint8_t>(out0 | (1U << READPICO_IOE_MODE));
-  (void)detail::ioeSetOutput(out0);
+  (void)detail::ioeUpdateBits(static_cast<uint8_t>(1U << READPICO_IOE_MODE),
+                              static_cast<uint8_t>(1U << READPICO_IOE_XOE));
   delay(1);
 
   (void)syVcomEn(false);
   if (g_syEnOn) (void)detail::syWrite(kSyRegOperation, 0x00);
   delay(kSyPoweroffHoldMs);
   (void)syEn(false);
+  // Do not leave a stale software "enabled" bit after a failed I2C write.
+  // The next epdPowerOn() must attempt to raise SY_EN again.
+  g_syEnOn = false;
   g_railsOn = false;
   logLine("[RDP] EPD rails off\r\n");
 }
