@@ -69,6 +69,10 @@ class EpdiyLcdDriver : public PanelDriver {
   void begin(EpdBus& bus) override;
   void deepSleep(EpdBus& bus) override;
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
+  void displayWithContext(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff,
+                          RefreshContext context) override;
+  void requestResync(uint8_t settlePasses) override;
+  void abortPostRefresh() override { _lastBaseMode = EpdiyLcdRefresh::Half; }
 
   // 抗锯齿用整体平面路径（supportsStripGrayscale() 保持默认 false，于是宿主走
   // copyGrayscaleLsb/Msb + displayGrayBuffer）：先把两个选择平面存下来，提交时由

@@ -17,3 +17,6 @@ void lcd_do_update(RenderContext_t* ctx);
  * In LCD mode, both threads do the same thing.
  */
 void lcd_calculate_frame(RenderContext_t* ctx, int thread_id);
+
+/** Convert one full physical scan line using the current phase selection. */
+void lcd_lookup_line(RenderContext_t* ctx, const uint8_t* input, uint8_t* output, int line);

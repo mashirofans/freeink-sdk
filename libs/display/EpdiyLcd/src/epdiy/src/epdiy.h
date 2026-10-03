@@ -529,6 +529,21 @@ enum EpdDrawError epd_draw_base(
     const EpdWaveform* waveform
 );
 
+/** Select per-line phase LUTs for the next LCD scan; a negative phase holds. */
+void epd_set_line_phase_luts(const uint8_t* const* phase_luts, const int8_t* line_phase);
+
+/** Select per-column-band phase LUTs for the next LCD scan. */
+void epd_set_col_phase_luts(
+    const uint8_t* const* phase_luts,
+    const int* x0,
+    const int* x1,
+    const int8_t* phase,
+    int nbands
+);
+
+/** Discard a staged phase-LUT selection that was not consumed by a scan. */
+void epd_clear_phase_luts(void);
+
 /// 把波形第 `frame` 相展开成 1ppB / S3 VE 用的 1K 表（256 × uint32）。
 void epd_build_1ppB_lut_1k(uint8_t* lut, const EpdWaveformPhases* phases, int frame);
 

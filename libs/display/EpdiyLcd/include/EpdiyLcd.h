@@ -69,7 +69,11 @@ struct EpdiyLcdConfig {
 /// entirely held so unchanged pixels are not driven at all. Re-driving a black pixel in
 /// place erases it white first, which is the white flash a turn shows; ordinary
 /// anti-aliased text turns use it, and static content is refreshed by the periodic GC16.
-enum class EpdiyLcdRefresh : uint8_t { Full, Half, Fast, TextTurn };
+enum class EpdiyLcdRefresh : uint8_t {
+  Full, Half, Fast, TextTurn,
+  // Spatial GL16 page turns, in physical framebuffer coordinates.
+  RippleLeft, RippleRight, RippleUp, RippleDown
+};
 
 /// 初始化总线并挂上波形。width/height 是面板扫描尺寸（本板 1216x684）。
 ///

@@ -37,6 +37,37 @@ const int clear_cycle_time = 15;
 static RenderContext_t render_context;
 static bool board_init_attempted;
 static bool renderer_ready;
+static const uint8_t* const* s_phase_luts;
+static const int8_t* s_line_phase;
+static const int* s_col_band_x0;
+static const int* s_col_band_x1;
+static const int8_t* s_col_band_phase;
+static int s_col_band_n;
+
+void epd_clear_phase_luts(void) {
+    s_phase_luts = NULL;
+    s_line_phase = NULL;
+    s_col_band_x0 = NULL;
+    s_col_band_x1 = NULL;
+    s_col_band_phase = NULL;
+    s_col_band_n = 0;
+}
+
+void epd_set_line_phase_luts(const uint8_t* const* phase_luts, const int8_t* line_phase) {
+    epd_clear_phase_luts();
+    s_phase_luts = phase_luts;
+    s_line_phase = line_phase;
+}
+
+void epd_set_col_phase_luts(const uint8_t* const* phase_luts, const int* x0, const int* x1,
+                            const int8_t* phase, int nbands) {
+    epd_clear_phase_luts();
+    s_phase_luts = phase_luts;
+    s_col_band_x0 = x0;
+    s_col_band_x1 = x1;
+    s_col_band_phase = phase;
+    s_col_band_n = nbands;
+}
 
 void epd_push_pixels(EpdRect area, short time, int color) {
     render_context.area = area;
@@ -187,6 +218,15 @@ enum EpdDrawError IRAM_ATTR epd_draw_base(
     const uint8_t* drawn_columns,
     const EpdWaveform* waveform
 ) {
+    // Consume the request even when validation below fails. A failed draw
+    // must never leave caller-owned phase pointers armed for a later frame.
+    const uint8_t* const* phase_luts = s_phase_luts;
+    const int8_t* line_phase = s_line_phase;
+    const int* col_band_x0 = s_col_band_x0;
+    const int* col_band_x1 = s_col_band_x1;
+    const int8_t* col_band_phase = s_col_band_phase;
+    const int col_band_n = s_col_band_n;
+    epd_clear_phase_luts();
     if (waveform == NULL) {
         return EPD_DRAW_NO_PHASES_AVAILABLE;
     }
@@ -212,6 +252,9 @@ enum EpdDrawError IRAM_ATTR epd_draw_base(
         frame_count = 1;
     }
 
+    if (phase_luts && (!(mode & MODE_PACKING_1PPB_DIFFERENCE) || frame_count != 1)) {
+        return EPD_DRAW_INVALID_PACKING_MODE;
+    }
     if (crop_to.width < 0 || crop_to.height < 0) {
         return EPD_DRAW_INVALID_CROP;
     }
@@ -250,6 +293,12 @@ enum EpdDrawError IRAM_ATTR epd_draw_base(
     render_context.data_ptr = data;
     render_context.lut_build_func = lut_functions.build_func;
     render_context.lut_lookup_func = lut_functions.lookup_func;
+    render_context.phase_luts = phase_luts;
+    render_context.line_phase = line_phase;
+    render_context.col_band_x0 = col_band_x0;
+    render_context.col_band_x1 = col_band_x1;
+    render_context.col_band_phase = col_band_phase;
+    render_context.col_band_n = col_band_n;
 
     render_context.lines_prepared = 0;
     render_context.lines_consumed = 0;
@@ -283,6 +332,12 @@ enum EpdDrawError IRAM_ATTR epd_draw_base(
     );
 
     lcd_do_update(&render_context);
+    render_context.phase_luts = NULL;
+    render_context.line_phase = NULL;
+    render_context.col_band_x0 = NULL;
+    render_context.col_band_x1 = NULL;
+    render_context.col_band_phase = NULL;
+    render_context.col_band_n = 0;
 
     if (render_context.error & EPD_DRAW_EMPTY_LINE_QUEUE) {
         ESP_LOGE("epdiy", "line buffer underrun occurred!");
@@ -390,6 +445,7 @@ fail:
 }
 
 void epd_renderer_deinit() {
+    epd_clear_phase_luts();
     const EpdBoardDefinition* board = epd_current_board();
     if (board_init_attempted && board != NULL) board->poweroff(epd_ctrl_state());
     for (int i = NUM_RENDER_THREADS - 1; i >= 0; i--) {

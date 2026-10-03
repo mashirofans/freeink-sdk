@@ -53,6 +53,27 @@ EpdiyLcdRefresh refreshFor(RefreshMode mode) {
   return EpdiyLcdRefresh::Fast;
 }
 
+EpdiyLcdRefresh refreshFor(RefreshMode mode, RefreshContext context) {
+  if (mode == RefreshMode::Full) return EpdiyLcdRefresh::Full;
+  switch (context) {
+    case RefreshContext::RippleLeft:
+      return EpdiyLcdRefresh::RippleLeft;
+    case RefreshContext::RippleRight:
+      return EpdiyLcdRefresh::RippleRight;
+    case RefreshContext::RippleUp:
+      return EpdiyLcdRefresh::RippleUp;
+    case RefreshContext::RippleDown:
+      return EpdiyLcdRefresh::RippleDown;
+    default:
+      return refreshFor(mode);
+  }
+}
+
+bool isRipple(EpdiyLcdRefresh mode) {
+  return mode == EpdiyLcdRefresh::RippleLeft || mode == EpdiyLcdRefresh::RippleRight ||
+         mode == EpdiyLcdRefresh::RippleUp || mode == EpdiyLcdRefresh::RippleDown;
+}
+
 }  // namespace
 
 EpdiyLcdDriver::EpdiyLcdDriver(const EpdiyLcdConfig& cfg) : _cfg(cfg) {}
@@ -104,6 +125,7 @@ void EpdiyLcdDriver::begin(EpdBus& bus) {
 
 void EpdiyLcdDriver::deepSleep(EpdBus& bus) {
   (void)bus;
+  _lastBaseMode = EpdiyLcdRefresh::Half;
   epdiyLcdDeepSleep();
   heap_caps_free(_lsb);
   heap_caps_free(_msb);
@@ -113,13 +135,24 @@ void EpdiyLcdDriver::deepSleep(EpdBus& bus) {
 }
 
 void EpdiyLcdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) {
+  displayWithContext(bus, fb, prev, mode, turnOff, RefreshContext::Normal);
+}
+
+void EpdiyLcdDriver::displayWithContext(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode,
+                                       bool turnOff, RefreshContext context) {
   (void)bus;
   (void)prev;  // epdiy's highlevel keeps its own previous frame / epdiy 自己记上一帧
+  // 独立推屏不能把波纹意图留给后续灰度提交。/ A standalone draw must not leave a ripple intent for a later gray commit.
+  _lastBaseMode = refreshFor(mode, context);
   if (!_ready) return;
 
   // 帧缓冲极性见文件顶部的 kBlackIsOne。/ Framebuffer polarity: see kBlackIsOne above.
-  _lastBaseMode = refreshFor(mode);
-  epdiyLcdDraw(fb, _lastBaseMode, turnOff);
+  epdiyLcdDraw(fb, refreshFor(mode, context), turnOff);
+}
+
+void EpdiyLcdDriver::requestResync(uint8_t settlePasses) {
+  (void)settlePasses;
+  _lastBaseMode = EpdiyLcdRefresh::Half;
 }
 
 void EpdiyLcdDriver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
@@ -139,6 +172,8 @@ void EpdiyLcdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
   (void)bus;
   (void)lut;
   (void)factoryMode;
+  const EpdiyLcdRefresh baseMode = _lastBaseMode;
+  _lastBaseMode = EpdiyLcdRefresh::Half;
   if (!_ready || _lsb == nullptr || _msb == nullptr) return;
 
   // `fb` 故意不用：抗锯齿提交时它装的是最后一个选择平面（与页面互补），推上去就是
@@ -164,8 +199,9 @@ void EpdiyLcdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
   // / The test is "not the clean profile" rather than "is Fast": the reader promotes an
   // ordinary page turn to GL16 (Half) on Read Pico, so keying on Fast alone would leave
   // the table uninstalled and silently lose the flicker-free turn.
-  const EpdiyLcdRefresh grayMode = _lastBaseMode == EpdiyLcdRefresh::Full ? EpdiyLcdRefresh::Full
-                                                                         : EpdiyLcdRefresh::TextTurn;
+  const EpdiyLcdRefresh grayMode = baseMode == EpdiyLcdRefresh::Full || isRipple(baseMode)
+                                     ? baseMode
+                                     : EpdiyLcdRefresh::TextTurn;
   epdiyLcdDrawGray(_lsb, _msb, grayMode, turnOff);
 }
 
@@ -173,9 +209,9 @@ void EpdiyLcdDriver::displayGrayscaleBaseWithContext(EpdBus& bus, const uint8_t*
                                                      RefreshContext context) {
   (void)bus;
   (void)turnOff;
-  (void)context;
+  _lastBaseMode = EpdiyLcdRefresh::Half;
   if (!_ready) return;
-  _lastBaseMode = refreshFor(fallback);
+  _lastBaseMode = refreshFor(fallback, context);
   // 底图只暂存。宿主接下来会写 LSB/MSB 平面并调 displayGray()，由它合成整页后推一次。
   // / Defer: the host writes the LSB/MSB planes next and calls displayGray(), which
   // composes the whole page and presents it once.

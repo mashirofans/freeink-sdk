@@ -178,6 +178,40 @@ void epd_lcd_set_prefill_lines(int lines) {
 int epd_lcd_prefill_lines(void) {
     return s_prefill_lines;
 }
+// Shared by the LCD feeder and host tests. Input must be a full 1ppB
+// difference row whenever a phase override is active.
+void IRAM_ATTR lcd_lookup_line(RenderContext_t* ctx, const uint8_t* ptr, uint8_t* buf, int line) {
+    if (ctx->col_band_n > 0 && ctx->phase_luts && ctx->col_band_x0 && ctx->col_band_x1
+        && ctx->col_band_phase) {
+        // A page-turn tick can assign a different phase to each physical
+        // 16-pixel band. Inactive bands remain at neutral voltage; active
+        // bands use the corresponding 1 KiB LUT. Difference input is
+        // 1 pixel per byte, so x offsets are byte offsets here.
+        memset(buf, 0x00, ctx->display_width / 4);
+        for (int band = 0; band < ctx->col_band_n; ++band) {
+            const int8_t phase = ctx->col_band_phase[band];
+            if (phase < 0 || !ctx->phase_luts[phase]) continue;
+            const int x0 = ctx->col_band_x0[band];
+            const int x1 = ctx->col_band_x1[band];
+            if (x0 < 0 || x1 > ctx->display_width || x0 >= x1 || (x0 & 15) || (x1 & 15)) continue;
+            ctx->lut_lookup_func((const uint32_t*)(ptr + x0), buf + x0 / 4, ctx->phase_luts[phase],
+                                 (uint32_t)(x1 - x0));
+        }
+    } else {
+        const uint8_t* lut = ctx->conversion_lut;
+        if (ctx->line_phase && ctx->phase_luts && line < ctx->display_height) {
+            const int8_t phase = ctx->line_phase[line];
+            if (phase < 0 || !ctx->phase_luts[phase]) {
+                memset(buf, 0, ctx->display_width / 4);
+                return;
+            }
+            lut = ctx->phase_luts[phase];
+        }
+        ctx->lut_lookup_func((const uint32_t*)ptr, buf, lut, ctx->display_width);
+    }
+
+}
+
 __attribute__((optimize("O3"))) void IRAM_ATTR
 lcd_calculate_frame(RenderContext_t* ctx, int thread_id) {
     assert(ctx->lut_lookup_func != NULL);
@@ -235,12 +269,10 @@ lcd_calculate_frame(RenderContext_t* ctx, int thread_id) {
             continue;
         }
 
-        uint32_t* lp = (uint32_t*)input_line;
         const uint8_t* ptr = ptr_start + bytes_per_line * (l - min_y);
 
         Cache_Start_DCache_Preload((uint32_t)ptr, ctx->display_width, 0);
 
-        lp = (uint32_t*)ptr;
 
         uint8_t* buf = NULL;
         while (buf == NULL) {
@@ -253,7 +285,7 @@ lcd_calculate_frame(RenderContext_t* ctx, int thread_id) {
             buf = lq_current(lq);
         }
 
-        ctx->lut_lookup_func(lp, buf, ctx->conversion_lut, ctx->display_width);
+        lcd_lookup_line(ctx, ptr, buf, l);
 
         // apply the line mask
         epd_apply_line_mask_VE(buf, ctx->line_mask, ctx->display_width / 4);

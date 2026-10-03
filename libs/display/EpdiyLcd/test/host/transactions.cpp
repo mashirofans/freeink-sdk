@@ -7,6 +7,7 @@
 #include <initializer_list>
 extern "C" {
 #include "e0470_epaper_waveform.h"
+#include "e0470_page_turn.h"
 #include "epd_lcd.h"
 #include "epdiy.h"
 void check_queue(void);
@@ -45,6 +46,10 @@ const EpdWaveform E0470_WAVEFORM{};
 const EpdWaveform E0470_TEXTTURN_WAVEFORM{};
 const EpdDisplay_t E0470_DISPLAY{16, 2, 16, 18, &E0470_WAVEFORM};
 void e0470_waveform_init() {}
+void e0470_page_turn_release() {}
+enum EpdDrawError e0470_page_turn(EpdiyHighlevelState*, e0470_turn_dir_t, int, EpdRect) {
+  return EPD_DRAW_SUCCESS;
+}
 // EpdiyLcd.cpp prints its per-frame diagnostics through the ESP-IDF rom console, and the
 // host has no such header. It declares the entry point itself under
 // !defined(ESP_PLATFORM); this is the definition it needs to link.

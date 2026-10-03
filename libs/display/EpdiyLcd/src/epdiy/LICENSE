@@ -10,6 +10,10 @@ License: LGPL-3.0-or-later (see COPYING.LESSER in this directory)
 - 波形表改为从 components/e0470_epaper_waveform 取
 - src/render.c / highlevel.c：差分按列裁剪、按 (from,to) 直方图无损跳过前导空相位、
   统计各阶段耗时；output_lcd/render_lcd.c：可配置的帧前预填行数
+- src/render.c / output_common/render_context.h / output_lcd/render_lcd.c：可选的单扫描
+  逐行/逐列相位 LUT 注入，用于本地 E0470 错相翻页扩展（不改变默认刷新路径）
+- src/e0470/e0470_page_turn.c：基于 E0470 GL16 的 16 条带物理坐标错相翻页引擎；
+  相位 LUT 按需从 PSRAM 分配，独立于默认波形与电压/扫描参数
 
 This directory is a trimmed fork of epdiy v2.0.0: only the ESP32-S3 LCD render
 path and the display definition for this board are kept. Local changes are

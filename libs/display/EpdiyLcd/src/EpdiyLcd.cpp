@@ -31,6 +31,7 @@ extern "C" {
 // / epdiy headers without extern "C" guards are wrapped here; re-wrapping the
 // guarded ones is harmless.
 #include "e0470/include/e0470_epaper_waveform.h"
+#include "e0470/include/e0470_page_turn.h"
 #include "epdiy/include/epd_lcd.h"
 #include "epdiy/include/epd_waveform.h"
 #include "epdiy/src/epd_board.h"
@@ -247,6 +248,7 @@ bool epdiyLcdBegin(const EpdiyLcdConfig& cfg, uint16_t width, uint16_t height, b
 }
 
 void epdiyLcdEnd() {
+  e0470_page_turn_release();
   if (!g_initialized) return;
   epd_deinit();
   epd_hl_deinit(&g_hl);
@@ -267,6 +269,10 @@ enum EpdDrawMode drawModeFor(EpdiyLcdRefresh mode) {
       return static_cast<enum EpdDrawMode>(MODE_GC16 | PREVIOUSLY_WHITE);
     case EpdiyLcdRefresh::Half:
     case EpdiyLcdRefresh::TextTurn:
+    case EpdiyLcdRefresh::RippleLeft:
+    case EpdiyLcdRefresh::RippleRight:
+    case EpdiyLcdRefresh::RippleUp:
+    case EpdiyLcdRefresh::RippleDown:
       return static_cast<enum EpdDrawMode>(MODE_GL16 | PREVIOUSLY_WHITE);
     case EpdiyLcdRefresh::Fast:
     default:
@@ -313,6 +319,20 @@ void recordConversion(int64_t startedUs) {
 }
 #endif
 
+bool isRipple(EpdiyLcdRefresh mode) {
+  return mode == EpdiyLcdRefresh::RippleLeft || mode == EpdiyLcdRefresh::RippleRight ||
+         mode == EpdiyLcdRefresh::RippleUp || mode == EpdiyLcdRefresh::RippleDown;
+}
+
+e0470_turn_dir_t rippleDirection(EpdiyLcdRefresh mode) {
+  switch (mode) {
+    case EpdiyLcdRefresh::RippleRight: return E0470_TURN_LTR;
+    case EpdiyLcdRefresh::RippleUp: return E0470_TURN_BTT;
+    case EpdiyLcdRefresh::RippleDown: return E0470_TURN_TTB;
+    default: return E0470_TURN_RTL;
+  }
+}
+
 bool pushFrame(EpdiyLcdRefresh mode, bool turnOff) {
   epd_poweron();
   if (!g_powerReady) {
@@ -338,8 +358,29 @@ bool pushFrame(EpdiyLcdRefresh mode, bool turnOff) {
   // / Full takes the all-lines-and-columns-dirty path; every other profile is pushed
   // differentially, and it is only a differential push that lets the held diagonal
   // actually skip a pixel.
-  const auto err = mode == EpdiyLcdRefresh::Full ? epd_hl_update_screen_full(&g_hl, drawModeFor(mode), temperature)
-                                                 : epd_hl_update_screen(&g_hl, drawModeFor(mode), temperature);
+  EpdDrawError err;
+  if (isRipple(mode)) {
+    err = e0470_page_turn_fullscreen(&g_hl, rippleDirection(mode), temperature);
+    // The 40 KiB PSRAM phase cache is transient. Release before returning to the
+    // reader so menus, sleep and networking do not retain animation memory.
+    e0470_page_turn_release();
+    if (err == EPD_DRAW_NO_PHASES_AVAILABLE || err == EPD_DRAW_INVALID_CROP) {
+      // Preflight failed before any scan; the old optical baseline is intact.
+      ESP_LOGW("EpdiyLcd", "Ripple unavailable (%u); using GL16", static_cast<unsigned>(err));
+      err = epd_hl_update_screen(&g_hl, drawModeFor(EpdiyLcdRefresh::Half), temperature);
+    } else if (err != EPD_DRAW_SUCCESS) {
+      // A partial animation leaves an unknown optical state. Preserve the
+      // composed target, clear physically, then rebuild the full gray baseline.
+      ESP_LOGW("EpdiyLcd", "Ripple interrupted (%u); rebuilding frame", static_cast<unsigned>(err));
+      g_baselineKnown = false;
+      epd_clear();
+      memset(g_hl.back_fb, 0xFF, static_cast<size_t>(epd_width()) / 2 * epd_height());
+      err = epd_hl_update_screen_full(&g_hl, drawModeFor(EpdiyLcdRefresh::Full), temperature);
+    }
+  } else {
+    err = mode == EpdiyLcdRefresh::Full ? epd_hl_update_screen_full(&g_hl, drawModeFor(mode), temperature)
+                                       : epd_hl_update_screen(&g_hl, drawModeFor(mode), temperature);
+  }
   if (swapWaveform) epd_hl_waveform(&g_hl, &E0470_WAVEFORM);
 #if FREEINK_READPICO_DIAGNOSTICS
   int diffMs, drawMs, copyMs;
