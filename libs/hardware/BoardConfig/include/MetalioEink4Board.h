@@ -1,197 +1,125 @@
 #pragma once
 
+// Metalio E-Ink 4, TCA9555 at 0x20 on SDA41/SCL42.
+// Expander indices 8..15 mean P1.0..P1.7, not ESP GPIO numbers.
 #include <Arduino.h>
 #include <Wire.h>
-#include <driver/gpio.h>
-#include <esp_rom_sys.h>
+#include <mutex>
 
-// Shared Wire owns transaction serialization (endTransmission(false) + requestFrom).
-// Only the input/setup/shutdown task writes the expander's output shadow.
-namespace freeink::metalio {
-constexpr uint8_t EXPANDER = 0x20;
-constexpr uint8_t CHARGER = 0x6B;
-constexpr uint16_t MAIN_POWER = 1u << 6;
-constexpr uint16_t SCREEN_POWER = 1u << 5;
-constexpr uint16_t PA_POWER = 1u << 4;
-constexpr uint16_t TOUCH_RESET = 1u << 9;
-constexpr uint16_t POWER_PULSE = 1u << 11;
-constexpr uint16_t USB_MUX_SEL = 1u << 0;  // High selects USB flash/debug, low selects the camera.
-constexpr uint16_t OUTPUTS = USB_MUX_SEL | MAIN_POWER | SCREEN_POWER | TOUCH_RESET | POWER_PULSE | PA_POWER | (1u << 1);
-constexpr uint16_t BOOT_OUTPUT = MAIN_POWER | POWER_PULSE | USB_MUX_SEL;
-inline uint16_t output = BOOT_OUTPUT;
-inline bool ready = false;
-inline bool bootPowerPending = true;
+namespace freeink {
+namespace metalio {
+constexpr uint8_t EXPANDER_ADDR = 0x20;
+constexpr uint8_t PIN_AMP_SELECT = 1;
+constexpr uint8_t PIN_AMP_ENABLE = 4;
+constexpr uint8_t PIN_SCREEN_SD_POWER = 5;
+constexpr uint8_t PIN_MAIN_POWER = 6;
+constexpr uint8_t PIN_VOLUME_DOWN = 7;
+constexpr uint8_t PIN_VOLUME_UP = 8;
+constexpr uint8_t PIN_TOUCH_RESET = 9;
+constexpr uint8_t PIN_POWER_PULSE = 11;
+constexpr int VIBRATION_GPIO = 44;
+constexpr int SD_DAT3_GPIO = 46;  // input-only; held high even with 1-bit SDMMC
 
-inline bool powerButtonPressed(bool pressed) {
-  if (!bootPowerPending) return pressed;
-  if (!pressed) bootPowerPending = false;
-  return false;  // Consume the initial held gesture and its release on every boot.
-}
-
-inline bool read(uint8_t addr, uint8_t reg, uint8_t* bytes, uint8_t count) {
-  Wire.beginTransmission(addr);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(addr, count, static_cast<uint8_t>(true)) != count) {
-    while (Wire.available()) Wire.read();
-    return false;
-  }
-  for (uint8_t i = 0; i < count; ++i) bytes[i] = Wire.read();
-  return true;
-}
-
-// Exact register setpoints in mV/mA; unsupported ranges or steps are rejected.
-struct ChargerConfig {
-  uint16_t vregMv;
-  uint16_t prechargeMa;
-  uint16_t terminationMa;
-  uint16_t chargeMa;
-  uint16_t inputLimitMa;
-};
-
-enum class ChargerConfigResult { Configured, BusNotReady, InvalidConfig, ProbeFailed, IoError };
-
-namespace detail {
-inline bool updateChargerBits(uint8_t reg, uint8_t mask, uint8_t value) {
-  uint8_t current = 0;
-  if (!read(CHARGER, reg, &current, 1)) return false;
-  Wire.beginTransmission(CHARGER);
-  Wire.write(reg);
-  Wire.write(static_cast<uint8_t>((current & static_cast<uint8_t>(~mask)) | (value & mask)));
-  return Wire.endTransmission() == 0;
-}
-}  // namespace detail
-
-inline ChargerConfigResult configureCharger(const ChargerConfig& config, uint8_t& partInfo) {
-  if (!ready) return ChargerConfigResult::BusNotReady;
-  if (config.vregMv < 3840 || config.vregMv > 4800 || config.vregMv % 10 || config.prechargeMa < 20 ||
-      config.prechargeMa > 620 || config.prechargeMa % 20 || config.terminationMa < 10 || config.terminationMa > 630 ||
-      config.terminationMa % 10 || config.chargeMa < 80 || config.chargeMa > 3040 || config.chargeMa % 80 ||
-      config.inputLimitMa < 100 || config.inputLimitMa > 3000 || config.inputLimitMa % 20)
-    return ChargerConfigResult::InvalidConfig;
-  if (!read(CHARGER, 0x38, &partInfo, 1)) return ChargerConfigResult::ProbeFailed;
-
-  const uint16_t vreg = config.vregMv / 10;
-  const uint8_t precharge = config.prechargeMa / 20;
-  const uint8_t termination = config.terminationMa / 10;
-  const uint8_t charge = config.chargeMa / 80;
-  const uint8_t inputLimit = config.inputLimitMa / 20;
-
-  // Keep charging disabled until every parameter and hardware termination is set.
-  if (!detail::updateChargerBits(0x16, 0x23, 0x00) ||
-      !detail::updateChargerBits(0x10, 0xF0, static_cast<uint8_t>(precharge << 4)) ||
-      !detail::updateChargerBits(0x11, 0x01, precharge >> 4) ||
-      !detail::updateChargerBits(0x12, 0xF8, static_cast<uint8_t>(termination << 3)) ||
-      !detail::updateChargerBits(0x13, 0x01, termination >> 5) ||
-      !detail::updateChargerBits(0x04, 0xF8, static_cast<uint8_t>(vreg << 3)) ||
-      !detail::updateChargerBits(0x05, 0x0F, vreg >> 5) ||
-      !detail::updateChargerBits(0x02, 0xC0, static_cast<uint8_t>(charge << 6)) ||
-      !detail::updateChargerBits(0x03, 0x0F, charge >> 2) ||
-      !detail::updateChargerBits(0x06, 0xF0, static_cast<uint8_t>(inputLimit << 4)) ||
-      !detail::updateChargerBits(0x07, 0x0F, inputLimit >> 4) || !detail::updateChargerBits(0x14, 0x04, 0x04) ||
-      !detail::updateChargerBits(0x16, 0x30, 0x20))
-    return ChargerConfigResult::IoError;
-  return ChargerConfigResult::Configured;
-}
-
-inline bool sleepTouch() {
-  Wire.beginTransmission(0x15);
-  Wire.write(0xA5);
-  Wire.write(0x03);
-  return Wire.endTransmission() == 0;
-}
-
-inline bool write16(uint8_t reg, uint16_t value) {
-  Wire.beginTransmission(EXPANDER);
+inline bool writeRegister(uint8_t reg, uint16_t value) {
+  Wire.beginTransmission(EXPANDER_ADDR);
   Wire.write(reg);
   Wire.write(static_cast<uint8_t>(value));
   Wire.write(static_cast<uint8_t>(value >> 8));
   return Wire.endTransmission() == 0;
 }
 
-inline bool setOutput(uint16_t value) {
-  if (!write16(2, value)) return false;
-  output = value;
+inline bool readRegister(uint8_t reg, uint16_t& value) {
+  Wire.beginTransmission(EXPANDER_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(EXPANDER_ADDR, uint8_t(2), uint8_t(true)) != 2) return false;
+  const uint8_t lo = Wire.read();
+  value = lo | (static_cast<uint16_t>(Wire.read()) << 8);
   return true;
 }
 
-inline bool begin() {
+// Read/modify/write preserves unrelated expander outputs. Call board functions
+// from the firmware's hardware task, never an ISR.
+inline bool setOutput(uint8_t pin, bool high) {
+  if (pin > 15) return false;
+  static std::mutex outputMutex;
+  std::lock_guard<std::mutex> lock(outputMutex);
+  uint16_t value;
+  if (!readRegister(2, value)) return false;
+  const uint16_t mask = uint16_t(1) << pin;
+  return writeRegister(2, high ? value | mask : value & ~mask);
+}
+
+// The NT26 4G modem has no power enable; it runs whenever the board is on.
+// Its host link is the vendor's framed UART-eth protocol (2 Mbaud), not plain
+// AT. Hold MRDY at the vendor driver's idle level so the host never requests it.
+constexpr int MODEM_MRDY_GPIO = 21;
+
+inline bool ensureBooted() {
+  static bool ready = false;
   if (ready) return true;
-  pinMode(44, OUTPUT);
-  digitalWrite(44, LOW);       // Keep the motor off until the HAL initializes feedback.
-  gpio_hold_dis(GPIO_NUM_44);  // Release the previous deep sleep's LOW hold, including capability-off builds.
-  pinMode(46, INPUT_PULLUP);   // SD DAT3/CD: input-only, never part of the 1-bit data bus.
-  pinMode(2, INPUT_PULLUP);
   if (!Wire.begin(41, 42, 400000)) return false;
   Wire.setTimeOut(10);
-  // Set idle output levels BEFORE enabling the drivers: no low shutdown pulse.
-  if (!setOutput(BOOT_OUTPUT) || !write16(6, static_cast<uint16_t>(~OUTPUTS)) || !setOutput(output | SCREEN_POWER))
-    return false;
+  constexpr uint16_t outputs = (1u << PIN_AMP_SELECT) | (1u << PIN_AMP_ENABLE) |
+      (1u << PIN_SCREEN_SD_POWER) | (1u << PIN_MAIN_POWER) |
+      (1u << PIN_TOUCH_RESET) | (1u << PIN_POWER_PULSE);
+  constexpr uint16_t inputs = (1u << PIN_VOLUME_DOWN) | (1u << PIN_VOLUME_UP) | (1u << 12);
+  uint16_t latch, config, polarity;
+  if (!readRegister(2, latch) || !readRegister(6, config) || !readRegister(4, polarity)) return false;
+  // Set safe levels BEFORE switching directions: no shutdown pulse or amp pop.
+  latch = (latch & ~outputs) | (1u << PIN_MAIN_POWER) | (1u << PIN_POWER_PULSE);
+  if (!writeRegister(2, latch) || !writeRegister(6, (config & ~outputs) | inputs) ||
+      !writeRegister(4, polarity & ~inputs)) return false;
+  if (!setOutput(PIN_SCREEN_SD_POWER, true)) return false;
   delay(10);
-  if (!setOutput(output | TOUCH_RESET)) return false;
+  if (!setOutput(PIN_TOUCH_RESET, true)) return false;
   delay(120);
+  pinMode(2, INPUT_PULLUP);
+  pinMode(VIBRATION_GPIO, OUTPUT);
+  digitalWrite(VIBRATION_GPIO, LOW);
+  pinMode(MODEM_MRDY_GPIO, OUTPUT);
+  digitalWrite(MODEM_MRDY_GPIO, HIGH);
   ready = true;
   return true;
 }
 
-inline uint8_t buttons() {
-  static uint32_t nextRead = 0;
-  static uint8_t state = 0;
-  const uint32_t now = millis();
-  if (!ready || static_cast<int32_t>(now - nextRead) < 0) return state;
-  uint8_t data[2];
-  if (!read(EXPANDER, 0, data, sizeof(data))) {
-    nextRead = now + 2000;
-    state = 0;  // A failed read must never retain a held key.
-    esp_rom_printf("[metalio] TCA9555 input read failed\r\n");
-    return state;
-  }
-  nextRead = now + 20;
-  state = ((data[0] & 0x80) ? 0 : (1u << 5)) | ((data[1] & 0x01) ? 0 : (1u << 4));
-  return state;
+// A failed read releases keys instead of retaining a stale pressed state.
+inline uint16_t readButtons() {
+  static unsigned long sampledAt = 0;
+  static uint16_t value = 0xFFFF;
+  static bool sampled = false;
+  const unsigned long now = millis();
+  if (sampled && now - sampledAt < 20) return value;
+  sampled = true;
+  sampledAt = now;
+  if (!ensureBooted() || !readRegister(0, value)) value = 0xFFFF;
+  return value;
 }
 
-inline bool externalPowerConnected(bool& connected) {
-  // Read CX25601N status independently of optional boot-time configuration.
-  static uint32_t nextRead = 0;
-  static bool valid = false;
-  static bool cached = false;
-  const uint32_t now = millis();
-  if (!ready) return false;
-  if (static_cast<int32_t>(now - nextRead) >= 0) {
-    uint8_t status;
-    valid = read(CHARGER, 0x1E, &status, 1);
-    if (valid) {
-      const uint8_t source = status & 7;
-      valid = source != 6;                  // Reserved encoding: leave fallback to the consumer.
-      cached = source >= 1 && source <= 5;  // 0 = absent, 7 = OTG output.
-    }
-    nextRead = now + (valid ? 1000 : 2000);
-  }
-  if (valid) connected = cached;
-  return valid;
+inline bool setAmplifier(bool enabled) {
+  return ensureBooted() && setOutput(PIN_AMP_SELECT, false) && setOutput(PIN_AMP_ENABLE, enabled);
 }
 
-// Caller has saved state, parked the display and waited for its BUSY completion.
-[[noreturn]] inline void shutdown() {
-  while (!begin()) {
-    esp_rom_printf("[metalio] Power-off initialization failed; retrying\r\n");
-    delay(1000);
-  }
-  esp_rom_printf("[metalio] Power-off pulses until hardware cuts power\r\n");
-  constexpr uint32_t PULSE_HALF_MS = 100;
-  uint32_t lastError = millis() - 1000;
-  for (;;) {
-    // Match the reference board: keep MAIN/SCREEN powered, PA off, and pulse forever.
-    const uint16_t rails = (output | MAIN_POWER | SCREEN_POWER) & ~PA_POWER;
-    const bool highOk = setOutput(rails | POWER_PULSE);
-    delay(PULSE_HALF_MS);
-    const bool lowOk = setOutput(rails & ~POWER_PULSE);
-    delay(PULSE_HALF_MS);
-    if ((!highOk || !lowOk) && static_cast<uint32_t>(millis() - lastError) >= 1000) {
-      lastError = millis();
-      esp_rom_printf("[metalio] Power-off pulse I2C failed; retrying\r\n");
-    }
-  }
+// Legacy blocking GPIO pulse. Prefer HapticManager for new consumers.
+// Do not mix this helper with an attached HapticManager PWM output.
+inline void vibrate(uint16_t durationMs = 35) {
+  if (!ensureBooted()) return;
+  digitalWrite(VIBRATION_GPIO, HIGH);
+  delay(durationMs);
+  digitalWrite(VIBRATION_GPIO, LOW);
 }
-}  // namespace freeink::metalio
+
+// Call only after display.deepSleep() and storage shutdown. Keep the shared
+// screen/card rail on while the panel's high-voltage supplies discharge.
+// One pulse per call; firmware may repeat if USB keeps the power controller alive.
+inline bool powerOff() {
+  if (!ensureBooted() || !setAmplifier(false)) return false;
+  delay(280);
+  if (!setOutput(PIN_POWER_PULSE, true)) return false;
+  delay(100);
+  if (!setOutput(PIN_POWER_PULSE, false)) return false;
+  delay(100);
+  return setOutput(PIN_POWER_PULSE, true);
+}
+}  // namespace metalio
+}  // namespace freeink
